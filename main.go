@@ -23,9 +23,7 @@ func main() {
 	// Public endpoints
 	r.GET("/ping", h.Ping)
 	r.GET("/drive/:key", h.DownloadFile)
-	r.GET("/", func(c *gin.Context) {
-		c.File("postman_collection.json")
-	})
+	r.GET("/", h.GetServerStats)
 
 	// Protected endpoints
 	auth := r.Group("/")
@@ -37,7 +35,7 @@ func main() {
 		auth.GET("/verify", h.CheckBotAndChat)
 	}
 
-	r.Run(":7777")
+	r.Run(":7860")
 }
 
 func initializeHandlers() *handlers.Handlers {
