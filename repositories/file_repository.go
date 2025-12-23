@@ -9,10 +9,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
+	// "path/filepath"
 	"strings"
 
-	"github.com/google/uuid"
+	// "github.com/google/uuid"
 )
 
 const TelegramBaseURL = "https://mxmxk-tele.hf.space"
