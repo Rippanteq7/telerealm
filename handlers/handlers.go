@@ -26,6 +26,14 @@ func NewHandlers(service services.FileService) *Handlers {
 	return &Handlers{service: service}
 }
 
+func (h *Handlers) GetServerStats(c *gin.Context) {
+	stats := utils.GetServerStats()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    stats,
+	})
+}
+
 func (h *Handlers) Ping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "pong",
