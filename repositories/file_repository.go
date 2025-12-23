@@ -23,6 +23,23 @@ type FileRepository interface {
 
 type fileRepository struct{}
 
+type ProgressReader struct {
+	Reader   io.Reader
+	Total    int64
+	Uploaded int64
+}
+
+func (pr *ProgressReader) Read(p []byte) (int, error) {
+	n, err := pr.Reader.Read(p)
+	pr.Uploaded += int64(n)
+
+	if pr.Total > 0 {
+		percent := float64(pr.Uploaded) / float64(pr.Total) * 100
+		fmt.Printf("\r[Upload] %.2f%%", percent)
+	}
+	return n, err
+}
+
 func NewFileRepository() FileRepository {
 	return &fileRepository{}
 }
@@ -30,49 +47,66 @@ func NewFileRepository() FileRepository {
 func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, fileName string) (string, error) {
 	url := fmt.Sprintf("%s/bot%s/sendDocument", TelegramBaseURL, botToken)
 
-	secureID := uuid.New().String()
-	fileExt := filepath.Ext(fileName)
-	newFileName := secureID + fileExt
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	_ = writer.WriteField("chat_id", chatID)
-
-	part, err := writer.CreateFormFile("document", newFileName)
-	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %v", err)
+	var fileSize int64
+	if f, ok := file.(interface{ Stat() (os.FileInfo, error) }); ok {
+		if info, err := f.Stat(); err == nil {
+			fileSize = info.Size()
+		}
 	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return "", fmt.Errorf("failed to copy file contents: %v", err)
+	if s, ok := file.(interface{ Size() int64 }); ok {
+		fileSize = s.Size()
 	}
 
-	err = writer.Close()
-	if err != nil {
-		return "", fmt.Errorf("failed to close multipart writer: %v", err)
-	}
+	log.Printf("[Upload] Start: %s (%d bytes)", fileName, fileSize)
 
-	req, err := http.NewRequest("POST", url, body)
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+		defer writer.Close()
+
+		writer.WriteField("chat_id", chatID)
+
+		secureID := uuid.New().String()
+		newFileName := secureID + filepath.Ext(fileName)
+
+		part, err := writer.CreateFormFile("document", newFileName)
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+
+		proxyReader := &ProgressReader{Reader: file, Total: fileSize}
+
+		if _, err := io.Copy(part, proxyReader); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
+
+	req, err := http.NewRequest("POST", url, pr)
 	if err != nil {
-		return "", fmt.Errorf("failed to create HTTP request: %v", err)
+		return "", err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
+
+	fmt.Println()
+
 	if err != nil {
-		return "", fmt.Errorf("failed to send HTTP request: %v", err)
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %v", err)
+		return "", err
 	}
-	log.Printf("[SendDocument] Response from %s: %s", url, string(respBody))
 
-	var sendDocResp struct {
+	var result struct {
 		Ok     bool `json:"ok"`
 		Result struct {
 			Document struct {
@@ -81,19 +115,17 @@ func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, f
 		} `json:"result"`
 	}
 
-	if err := json.Unmarshal(respBody, &sendDocResp); err != nil {
-		return "", fmt.Errorf("failed to decode JSON response: %v", err)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
 	}
 
-	if !sendDocResp.Ok {
-		return "", fmt.Errorf("telegram API returned not ok status")
+	if !result.Ok {
+		return "", fmt.Errorf("api error: %s", string(respBody))
 	}
 
-	fileID := sendDocResp.Result.Document.FileID
-
-	return fileID, nil
+	log.Printf("[Upload] Success. FileID: %s", result.Result.Document.FileID)
+	return result.Result.Document.FileID, nil
 }
-
 func (r *fileRepository) GetFileInfo(botToken, fileID string) (string, int, error) {
 	url := fmt.Sprintf("%s/bot%s/getFile?file_id=%s", TelegramBaseURL, botToken, fileID)
 
