@@ -29,8 +29,7 @@ func NewHandlers(service services.FileService) *Handlers {
 func (h *Handlers) GetServerStats(c *gin.Context) {
 	stats := utils.GetServerStats()
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    stats,
+		"data": stats,
 	})
 }
 
