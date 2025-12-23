@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -53,44 +54,40 @@ func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, f
 		if info, err := f.Stat(); err == nil {
 			fileSize = info.Size()
 		}
-	}
-	if s, ok := file.(interface{ Size() int64 }); ok {
+	} else if s, ok := file.(interface{ Size() int64 }); ok {
 		fileSize = s.Size()
 	}
 
 	log.Printf("[Upload] Start: %s (%d bytes)", fileName, fileSize)
 
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
+	bodyBuf := &bytes.Buffer{}
+	writer := multipart.NewWriter(bodyBuf)
 
-	go func() {
-		defer pw.Close()
-		defer writer.Close()
+	writer.WriteField("chat_id", chatID)
 
-		writer.WriteField("chat_id", chatID)
-
-		secureID := uuid.New().String()
-		newFileName := secureID + filepath.Ext(fileName)
-
-		part, err := writer.CreateFormFile("document", newFileName)
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-
-		proxyReader := &ProgressReader{Reader: file, Total: fileSize}
-
-		if _, err := io.Copy(part, proxyReader); err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-	}()
-
-	req, err := http.NewRequest("POST", url, pr)
+	_, err := writer.CreateFormFile("document", fileName)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	contentType := writer.FormDataContentType()
+	boundary := writer.Boundary()
+
+	footer := fmt.Sprintf("\r\n--%s--\r\n", boundary)
+	footerReader := strings.NewReader(footer)
+
+	totalPayloadSize := int64(bodyBuf.Len()) + fileSize + int64(footerReader.Len())
+
+	proxyReader := &ProgressReader{Reader: file, Total: fileSize}
+	fullBody := io.MultiReader(bodyBuf, proxyReader, footerReader)
+
+	req, err := http.NewRequest("POST", url, fullBody)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", contentType)
+	req.ContentLength = totalPayloadSize
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -98,7 +95,7 @@ func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, f
 	fmt.Println()
 
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("network error: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -109,6 +106,7 @@ func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, f
 
 	var result struct {
 		Ok     bool `json:"ok"`
+		Description string `json:"description"`
 		Result struct {
 			Document struct {
 				FileID string `json:"file_id"`
@@ -117,16 +115,17 @@ func (r *fileRepository) SendDocument(botToken, chatID string, file io.Reader, f
 	}
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", err
+		return "", fmt.Errorf("decode error: %v | Raw: %s", err, string(respBody))
 	}
 
 	if !result.Ok {
-		return "", fmt.Errorf("api error: %s", string(respBody))
+		return "", fmt.Errorf("api error: %s", result.Description)
 	}
 
 	log.Printf("[Upload] Success. FileID: %s", result.Result.Document.FileID)
 	return result.Result.Document.FileID, nil
 }
+
 func (r *fileRepository) GetFileInfo(botToken, fileID string) (string, int, error) {
 	url := fmt.Sprintf("%s/bot%s/getFile?file_id=%s", TelegramBaseURL, botToken, fileID)
 
